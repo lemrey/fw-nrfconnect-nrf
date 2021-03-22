@@ -91,11 +91,11 @@ struct download_client_cfg {
 	 *  Pass -1 to disable TLS.
 	 */
 	int sec_tag;
-	/** Access point name identifying a packet data network.
-	 *  Pass a null-terminated string with the APN
-	 *  or NULL to use the default APN.
+	/**
+	 * PDN ID to be used for the download.
+	 * Zero is the default PDN.
 	 */
-	const char *apn;
+	uint8_t pdn_id;
 	/** Maximum fragment size to download. 0 indicates that Kconfigured
 	 *  values shall be used.
 	 */
