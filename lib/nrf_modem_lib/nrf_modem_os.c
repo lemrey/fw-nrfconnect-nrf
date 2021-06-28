@@ -190,6 +190,139 @@ void nrf_modem_os_busywait(int32_t usec)
 	k_busy_wait(usec);
 }
 
+#define SOFTSIM_STACK_SIZE 512
+#define SOFTSIM_PRIORITY 5
+
+K_THREAD_STACK_DEFINE(softsim_stack_area, SOFTSIM_STACK_SIZE);
+
+struct k_work_q softsim_work_q;
+
+struct softsim_req {
+	struct k_work work;
+	const enum UICCReq req;
+	uint16_t req_id;
+	uint16_t data_len;
+	uint8_t data[8];
+};
+
+static struct softsim_req softsim_init = { .req = INIT };
+static struct softsim_req softsim_apdu = { .req = APDU };
+static struct softsim_req softsim_deinit = { .req = DEINIT };
+
+static void (*modem_softsim_init)(int32_t ret,
+				  uint16_t req_id,
+				  uint16_t data_len, uint8_t const *data);
+static void (*modem_softsim_apdu)(int32_t ret,
+				  uint16_t req_id,
+				  uint16_t data_len, uint8_t const *data);
+static void (*modem_softsim_deinit)(uint16_t req_id);
+
+static int32_t g_softsim_driver_init_mock(uint16_t *data_len_res, uint8_t *data_res)
+{
+	*data_len_res = 4;
+	memset(data_res, 0xF, *data_len_res);
+
+	return 0;
+}
+
+static int32_t g_softsim_driver_apdu_mock(uint16_t data_len_req, uint8_t *data_req,
+					  uint16_t *data_len_res, uint8_t *data_res)
+{
+	*data_len_res = 4;
+	memset(data_res, 0xF, *data_len_res);
+
+	return 0;
+}
+
+static void g_softsim_driver_deinit_mock(void)
+{
+}
+
+static void work_softsim_req(struct k_work *item)
+{
+	int ret;
+
+	struct softsim_req *s_req =
+		CONTAINER_OF(item, struct softsim_req, work);
+
+	switch(s_req->req) {
+	case INIT: {
+		int16_t data_len;
+		uint8_t atr[8];
+
+		ret = g_softsim_driver_init_mock(&data_len, atr);
+
+		modem_softsim_init(ret, s_req->req_id, data_len, atr);
+
+		break;
+	}
+	case APDU: {
+		int16_t data_len;
+		uint8_t apdu[8];
+
+		ret = g_softsim_driver_apdu_mock(s_req->data_len, s_req->data,
+						 &data_len, apdu);
+
+		modem_softsim_apdu(ret, s_req->req_id, data_len, apdu);
+
+		break;
+	}
+	case DEINIT: {
+		/* As per specs, the request may not fail */
+		g_softsim_driver_deinit_mock();
+
+		modem_softsim_deinit(s_req->req_id);
+
+		break;
+	}
+	default:
+		break;
+	}
+}
+
+void nrf_modem_os_softsim_setup(struct nrf_softsim_callbacks cbs)
+{
+	modem_softsim_init = cbs.init;
+	modem_softsim_apdu = cbs.apdu;
+	modem_softsim_deinit = cbs.deinit;
+
+	k_work_init(&softsim_init.work, work_softsim_req);
+	k_work_init(&softsim_apdu.work, work_softsim_req);
+	k_work_init(&softsim_deinit.work, work_softsim_req);
+}
+
+void nrf_modem_os_softsim_defer_req(enum UICCReq req, uint16_t req_id,
+				    uint16_t data_len, uint8_t const *data)
+{
+	switch (req) {
+	case INIT: {
+		softsim_init.req_id = req_id;
+
+		k_work_submit_to_queue(&softsim_work_q, &softsim_init.work);
+
+		break;
+	}
+	case APDU: {
+		softsim_apdu.req_id = req_id;
+		softsim_apdu.data_len = data_len;
+		memcpy(softsim_apdu.data, data, data_len);
+
+		k_work_submit_to_queue(&softsim_work_q, &softsim_apdu.work);
+
+		break;
+	}
+	case DEINIT: {
+		softsim_deinit.req_id = req_id;
+
+		k_work_submit_to_queue(&softsim_work_q, &softsim_deinit.work);
+
+		break;
+	}
+	default:
+		break;
+	}
+}
+
 int32_t nrf_modem_os_timedwait(uint32_t context, int32_t *timeout)
 {
 	struct sleeping_thread thread;
@@ -634,6 +767,9 @@ void nrf_modem_os_init(void)
 	k_work_reschedule(&heap_task.work,
 		K_MSEC(CONFIG_NRF_MODEM_LIB_HEAP_DUMP_PERIOD_MS));
 #endif
+	k_work_queue_start(&softsim_work_q, softsim_stack_area,
+			   K_THREAD_STACK_SIZEOF(softsim_stack_area),
+			   SOFTSIM_PRIORITY, NULL);
 }
 
 int32_t nrf_modem_os_trace_put(const uint8_t * const data, uint32_t len)
